@@ -1,7 +1,6 @@
 (function () {
   'use strict';
 
-  // Перевод
   Lampa.Lang.add({
     jellyfin_add: {
       ru: 'Добавить в Jellyfin',
@@ -10,92 +9,106 @@
     }
   });
 
-  // Обработчик события 'torrent:onlong' — момент, когда формируется меню
+  // Сохраняем оригинальный Select.show
+  const originalSelectShow = Lampa.Select.show;
+
+  Lampa.Select.show = function (params) {
+    // Проверяем, что это меню "Действие" для торрента
+    if (
+      params.title === Lampa.Lang.translate('title_action') &&
+      Array.isArray(params.items) &&
+      params.items.some(item => item.tomy !== undefined) // признак меню торрента
+    ) {
+      // Добавляем наш пункт
+      params.items.push({
+        title: Lampa.Lang.translate('jellyfin_add'),
+        jellyfin: true
+      });
+
+      // Сохраняем оригинальный onSelect
+      const originalOnSelect = params.onSelect;
+
+      // Подменяем onSelect
+      params.onSelect = function (selected) {
+        if (selected.jellyfin) {
+          // В оригинале `element` и `item` доступны через замыкание,
+          // но у нас их нет. Однако в Lampac они передаются в `menu` через `Lampa.Listener.send('torrent', ...)`
+          // и сохраняются в глобальный контекст (мы его сохраним отдельно)
+
+          if (window.__lampac_torrent_element) {
+            addToJellyfin(window.__lampac_torrent_element);
+          } else {
+            Lampa.Noty.show('Не удалось получить данные торрента');
+          }
+        } else {
+          // Вызываем оригинальный обработчик
+          if (originalOnSelect) originalOnSelect(selected);
+        }
+      };
+    }
+
+    return originalSelectShow.call(this, params);
+  };
+
+  // Сохраняем element при вызове контекстного меню (hover:long)
   Lampa.Listener.follow('torrent', function (e) {
-    if (e.type !== 'onlong' || !e.menu) return;
-
-    // Добавляем новый пункт в меню
-    e.menu.push({
-      title: Lampa.Lang.translate('jellyfin_add'),
-      jellyfin: true
-    });
+    if (e.type === 'onlong') {
+      window.__lampac_torrent_element = e.element;
+    }
   });
 
-  // Обработчик выбора в Select.show
-  Lampa.Listener.follow('select', function (e) {
-    if (!e.items || !Array.isArray(e.items)) return;
-
-    // Ищем, есть ли в списке наш пункт
-    const jellyfinItem = e.items.find(i => i.jellyfin);
-    if (!jellyfinItem) return;
-
-    // Сохраняем оригинальный onSelect
-    const originalOnSelect = e.onSelect;
-
-    // Подменяем onSelect, чтобы перехватить выбор
-    e.onSelect = function (selected) {
-      if (selected.jellyfin) {
-        // Получаем данные торрента из контекста
-        const item = e.context?.item || {};
-        const element = e.context?.element || {};
-
-        // Здесь реализуйте логику добавления в Jellyfin
-        // Например, отправка запроса на ваш сервер или открытие URL
-        addToJellyfin(item, element);
-      } else if (originalOnSelect) {
-        originalOnSelect(selected);
-      }
-    };
-  });
-
-  // Функция добавления торрента в Jellyfin
-  function addToJellyfin(item, element) {
-    // Пример: получаем magnet-ссылку или торрент-файл
-    const torrentUrl = item.url || item.magnet || item.link;
-    const title = item.title || item.name || 'Без названия';
+  function addToJellyfin(element) {
+    const torrentUrl = element.MagnetUri || element.Link;
 
     if (!torrentUrl) {
       Lampa.Noty.show(Lampa.Lang.translate('Нет ссылки на торрент'));
       return;
     }
+    
+    let torrserverUrl = null;
+    if (Lampa.Torserver.ip()) {
+       torrserverUrl = Lampa.Torserver.url();
+    }
 
-    // Пример: отправка на ваш промежуточный сервер, который добавит в Jellyfin
-    // Замените YOUR_JELLYFIN_ADD_URL на ваш реальный endpoint
-    const jellyfinAddUrl = 'http://IP:9118/jellyfin/add?title=' + encodeURIComponent(title) + '&url=' + encodeURIComponent(torrentUrl);
+    if (!torrserverUrl) {
+      Lampa.Noty.show('TorrServer URL не настроен');
+      return;
+    }
 
-    // Можно просто открыть URL (если сервер обрабатывает GET)
-    // Или сделать fetch, если нужно фоновое добавление
-    Lampa.Utils.request({
-      url: jellyfinAddUrl,
-      success: function () {
-        Lampa.Noty.show('Добавлено в Jellyfin');
-      },
-      error: function () {
-        Lampa.Noty.show('Ошибка добавления');
+    const payload = {
+      action: 'addJlfn',
+      link: torrentUrl
+    };
+
+    const headers = {
+      'accept': 'application/json',
+      'Content-Type': 'application/json'
+    };
+
+    if (Lampa.Storage.field('torrserver_auth')) {
+      const login = Lampa.Storage.get('torrserver_login') || '';
+      const password = Lampa.Storage.value('torrserver_password') || '';
+      if (login && password) {
+        const credentials = btoa(login + ':' + password);
+        headers['Authorization'] = 'Basic ' + credentials;
       }
+    }
+
+    // Используем fetch
+  fetch(torrserverUrl + '/torrents', {
+    method: 'POST',
+    headers: headers,
+    body: JSON.stringify(payload)
+  })
+    .then(function (response) {
+      if (response.ok) {
+        Lampa.Noty.show('Торрент добавлен в TorrServer (Jellyfin)');
+      } else {
+        throw new Error('HTTP ' + response.status);
+      }
+    })
+    .catch(function (error) {
+      Lampa.Noty.show('Ошибка добавления: ' + (error.message || 'неизвестно'));
     });
   }
-
-  // Дополнительно: чтобы Select.show знал контекст (item/element), нужно его передать
-  // Lampac обычно вызывает Select.show без контекста, поэтому перехватим вызов
-
-  const originalSelectShow = Lampa.Select.show;
-  Lampa.Select.show = function (params) {
-    // Если это меню торрентов (проверяем по заголовку или наличию torrent-специфичных полей)
-    if (params.title === Lampa.Lang.translate('title_action') && params.items && params.items.some(i => i.tomy !== undefined)) {
-      // Сохраняем контекст из последнего torrent:onlong
-      if (window.__lampac_torrent_context) {
-        params.context = window.__lampac_torrent_context;
-      }
-    }
-    return originalSelectShow.call(this, params);
-  };
-
-  // Сохраняем контекст при вызове onlong
-  Lampa.Listener.follow('torrent', function (e) {
-    if (e.type === 'onlong') {
-      window.__lampac_torrent_context = { item: e.item, element: e.element };
-    }
-  });
-
 })();
